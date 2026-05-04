@@ -38,10 +38,15 @@ apt-get update -qq
 apt-get install -y -qq curl wget git dnsutils
 
 echo "==> Installing Go..."
+GO_VERSION="1.23.4"
 if ! command -v go &>/dev/null || [[ "$(go version | awk '{print $3}' | tr -d 'go')" < "1.21" ]]; then
-    snap install go --classic
+    wget -q "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -O /tmp/go.tar.gz
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf /tmp/go.tar.gz
+    rm /tmp/go.tar.gz
+    ln -sf /usr/local/go/bin/go /usr/local/bin/go
 fi
-export PATH="$PATH:/snap/bin:/root/go/bin"
+export PATH="$PATH:/usr/local/go/bin:/root/go/bin"
 
 echo "==> Building Caddy with naive forwardproxy..."
 go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
