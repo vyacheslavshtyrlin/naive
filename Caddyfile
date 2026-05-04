@@ -1,0 +1,20 @@
+{
+    admin off
+    log {
+        output discard
+    }
+}
+
+{$DOMAIN}:443 {
+    route {
+        forward_proxy {
+            basic_auth {$USER} {$PASS}
+            hide_ip
+            hide_via
+            probe_resistance
+        }
+        reverse_proxy {$FALLBACK} {
+            header_up Host {upstream_hostport}
+        }
+    }
+}
