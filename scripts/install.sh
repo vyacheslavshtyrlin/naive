@@ -12,6 +12,7 @@ fi
 source "$ROOT_DIR/.env"
 
 : "${DOMAIN:?DOMAIN is required}"
+: "${EMAIL:?EMAIL is required}"
 : "${USER:?USER is required}"
 : "${PASS:?PASS is required}"
 : "${FALLBACK:?FALLBACK is required}"
@@ -35,80 +36,76 @@ fi
 
 echo "==> Installing dependencies..."
 apt-get update -qq
-apt-get install -y -qq curl wget git dnsutils
+apt-get install -y -qq curl wget git dnsutils openssl
 
-echo "==> Installing Go..."
-GO_VERSION="1.23.4"
-if ! command -v go &>/dev/null || [[ "$(go version | awk '{print $3}' | tr -d 'go')" < "1.21" ]]; then
+echo "==> Configuring SSH port $SSH_PORT..."
+if ! grep -q "^Port $SSH_PORT" /etc/ssh/sshd_config; then
+    sed -i "s/^#\?Port .*/Port $SSH_PORT/" /etc/ssh/sshd_config
+    grep -q "^Port" /etc/ssh/sshd_config || echo "Port $SSH_PORT" >> /etc/ssh/sshd_config
+    systemctl restart sshd
+fi
+
+echo "==> Installing Go 1.22.0..."
+GO_VERSION="1.22.0"
+if ! command -v go &>/dev/null || [[ "$(go version | awk '{print $3}' | tr -d 'go')" != "1.22.0" ]]; then
     wget -q "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -O /tmp/go.tar.gz
     rm -rf /usr/local/go
     tar -C /usr/local -xzf /tmp/go.tar.gz
     rm /tmp/go.tar.gz
-    ln -sf /usr/local/go/bin/go /usr/local/bin/go
 fi
-export PATH="$PATH:/usr/local/go/bin:/root/go/bin"
+export PATH="/usr/local/go/bin:/root/go/bin:$PATH"
 
 echo "==> Building Caddy with naive forwardproxy..."
+mkdir -p /root/tmp
+export TMPDIR=/root/tmp
 go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 ~/go/bin/xcaddy build \
     --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive \
-    --output /usr/local/bin/caddy
+    --output /usr/bin/caddy
 
-chmod +x /usr/local/bin/caddy
-
-echo "==> Creating caddy user..."
-if ! id caddy &>/dev/null; then
-    useradd --system --home /var/lib/caddy --shell /sbin/nologin caddy
-fi
-mkdir -p /var/lib/caddy /etc/caddy /var/log/caddy
-chown -R caddy:caddy /var/lib/caddy /var/log/caddy
+chmod +x /usr/bin/caddy
 
 echo "==> Writing Caddyfile..."
+mkdir -p /etc/caddy
 cat > /etc/caddy/Caddyfile <<EOF
-{
-    admin off
-    log {
-        output discard
-    }
-}
+:443, ${DOMAIN}
+tls ${EMAIL}
 
-${DOMAIN}:443 {
-    route {
-        forward_proxy {
-            basic_auth ${USER} ${PASS}
-            hide_ip
-            hide_via
-            probe_resistance
-        }
-        reverse_proxy ${FALLBACK} {
-            header_up Host {upstream_hostport}
-        }
-    }
+route {
+  forward_proxy {
+    basic_auth ${USER} ${PASS}
+    hide_ip
+    hide_via
+    probe_resistance
+  }
+  reverse_proxy ${FALLBACK} {
+    header_up Host {upstream_hostport}
+    header_up X-Forwarded-Host {host}
+  }
 }
 EOF
-
-chown caddy:caddy /etc/caddy/Caddyfile
-chmod 640 /etc/caddy/Caddyfile
 
 echo "==> Writing systemd unit..."
 cat > /etc/systemd/system/caddy.service <<'UNIT'
 [Unit]
-Description=Caddy web server
-After=network-online.target
-Wants=network-online.target
+Description=Caddy with NaiveProxy
+After=network.target network-online.target
+Requires=network-online.target
 
 [Service]
-User=caddy
-Group=caddy
-ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile
-ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile
+Type=notify
+User=root
+Group=root
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
 TimeoutStopSec=5s
 LimitNOFILE=1048576
+LimitNPROC=512
 PrivateTmp=true
-ProtectSystem=strict
+ProtectSystem=full
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-ReadWritePaths=/var/lib/caddy /var/log/caddy /etc/caddy
+Restart=always
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
@@ -126,7 +123,7 @@ systemctl enable --now caddy
 
 echo "==> Waiting for TLS certificate..."
 sleep 10
-if /usr/local/bin/caddy list-certificates 2>&1 | grep -q "$DOMAIN"; then
+if /usr/bin/caddy list-certificates 2>&1 | grep -q "$DOMAIN"; then
     echo "OK: Certificate obtained for $DOMAIN"
 else
     echo "WARNING: Certificate not yet visible. Check: journalctl -u caddy -f"
@@ -135,4 +132,4 @@ fi
 echo ""
 echo "==> Installation complete."
 echo "    Test: curl -I https://$DOMAIN"
-echo "    Test proxy: curl -v --proxy-user $USER:$PASS --proxytunnel -x https://$DOMAIN https://ifconfig.me"
+echo "    Proxy URI: naive://${USER}:${PASS}@${DOMAIN}:443"
